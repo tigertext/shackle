@@ -14,6 +14,7 @@
 %% ETS tables
 -define(ETS_TABLE_BACKLOG, shackle_backlog).
 -define(ETS_TABLE_POOL_INDEX, shackle_pool_index).
+-define(ETS_TABLE_POOL_BAD_WORKERS, shackle_pool_bad_workers).
 -define(ETS_TABLE_QUEUE, shackle_queue).
 
 %% compatibility
