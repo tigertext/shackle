@@ -152,10 +152,10 @@ options_rec(Client, Options) ->
 
 server_index(Name, PoolSize, Stratege) ->
     server_index(Name, PoolSize, Stratege, 1).
-server_index(Name, _PoolSize, _Stratege, N) when N > 5 ->
+server_index(Name, PoolSize, _Stratege, N) when N > (0.5 * PoolSize) ->
     %% too many retires and cannot find a live worker. something is wrong with this worker pool
     %% consider disabling it.
-    shackle_utils:warning_msg(Name, "Cannot find a live worker after many retries, consider disable this pool", []),
+    shackle_utils:warning_msg(Name, "Cannot find a live worker after many retries, consider to disable this pool, tried ~p times. ", [N]),
     {error, no_worker};
 
 server_index(Name, PoolSize, random, N) ->
@@ -170,7 +170,7 @@ server_index(Name, PoolSize, round_robin, N) ->
 check_server_id(Name, PoolSize, ServerId, Stretegy, N) ->
     case is_worker_disabled(Name, ServerId) of
         true ->
-            shackle_utils:warning_msg(Name, "got a dead worker, try again ~p", [ServerId]),
+            shackle_utils:warning_msg(Name, "got a dead worker id ~p, try again", [ServerId]),
             server_index(Name, PoolSize, Stretegy, N);
         _ ->
             ServerId
