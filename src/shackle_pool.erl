@@ -110,8 +110,8 @@ worker_down(PoolName, Index) ->
 
 -spec worker_up(pool_name(), pos_integer()) -> no_return().
 worker_up(PoolName, Index) ->
-    ets:delete_object(?ETS_TABLE_POOL_BAD_WORKERS, {PoolName, Index}),
-    worker_up_cb(ets:update_counter(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, PoolName, 1), PoolName, options(PoolName)).
+    ets:delete(?ETS_TABLE_POOL_BAD_WORKERS, {PoolName, Index}),
+    worker_up_cb(ets:update_counter(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, PoolName, -1), PoolName, options(PoolName)).
 
 %% private
 cleanup(Name, OptionsRec) ->
@@ -143,12 +143,19 @@ options_rec(Client, Options) ->
     BacklogSize = ?LOOKUP(backlog_size, Options, ?DEFAULT_BACKLOG_SIZE),
     PoolSize = ?LOOKUP(pool_size, Options, ?DEFAULT_POOL_SIZE),
     PoolStrategy = ?LOOKUP(pool_strategy, Options, ?DEFAULT_POOL_STRATEGY),
-    
+    PoolFailureThresholdPercentage = ?LOOKUP(pool_failure_threshold_percentage, Options, ?DEFAULT_POOL_FAILURE_THRESHOLD_PERCENTAGE),
+    PoolRecoverThresholdPercentage = ?LOOKUP(pool_recover_threshold_percentage, Options, ?DEFAULT_POOL_RECOVER_THRESHOLD_PERCENTAGE),
+    FailureCbMod = ?LOOKUP(pool_failure_callback_module, Options),
+    RecoverCbMod = ?LOOKUP(pool_recover_callback_module, Options),
     #pool_options{
         backlog_size = BacklogSize,
         client = Client,
         pool_size = PoolSize,
-        pool_strategy = PoolStrategy
+        pool_strategy = PoolStrategy,
+        pool_failure_threshold_percentage = PoolFailureThresholdPercentage,
+        pool_recover_threshold_percentage = PoolRecoverThresholdPercentage,
+        pool_failure_callback_mod = FailureCbMod,
+        pool_recover_callback_mod = RecoverCbMod
     }.
 
 server_index(Name, PoolSize, Stratege) ->
@@ -181,11 +188,11 @@ setup(Name, OptionsRec) ->
     setup_ets(Name, OptionsRec),
     setup_foil(Name, OptionsRec).
 
-setup_ets(Name, #pool_options{pool_strategy = round_robin}) ->
+setup_ets(Name, #pool_options{pool_strategy = round_robin, pool_size = Size}) ->
     ets:insert_new(?ETS_TABLE_POOL_INDEX, {{Name, round_robin}, 1}),
-    ets:insert_new(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, {Name, 0});
-setup_ets(Name, _OptionsRec) ->
-    ets:insert_new(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, {Name, 0}).
+    ets:insert_new(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, {Name, Size});
+setup_ets(Name, #pool_options{pool_size = Size}) ->
+    ets:insert_new(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, {Name, Size}).
 
 setup_foil(Name, #pool_options{pool_size = PoolSize} = OptionsRec) ->
     foil:insert(?MODULE, Name, OptionsRec),
@@ -249,17 +256,27 @@ init_ets() ->
 worker_down_cb(NumberOfFailedWorkers, PoolName,
     {ok, #pool_options{pool_size = PoolSize,
     pool_failure_threshold_percentage = DisablePercentage,
-    pool_failure_callback_fn = Fun}}) when (NumberOfFailedWorkers / PoolSize) >= DisablePercentage,
-                                            is_function(Fun) ->
-    Fun(PoolName, NumberOfFailedWorkers);
+    pool_failure_callback_mod = Mod}}) when (NumberOfFailedWorkers / PoolSize) >= DisablePercentage,
+                                            Mod /= undefined ->
+    case erlang:function_exported(Mod, node_down, 2) of
+        true ->
+            Mod:node_down(PoolName, NumberOfFailedWorkers);
+        false ->
+            ok
+    end;
 worker_down_cb(_, _, _)->
     ok.
 
-worker_up_cb(NumberOfFailedWorkersss, PoolName,
+worker_up_cb(NumberOfFailedWorkers, PoolName,
     {ok, #pool_options{pool_size = PoolSize,
         pool_recover_threshold_percentage = EnablePercentage,
-        pool_recover_callback_fn = Fun}}) when (NumberOfFailedWorkersss / PoolSize) =< EnablePercentage,
-    is_function(Fun) ->
-    Fun(NumberOfFailedWorkersss, PoolName);
+        pool_recover_callback_mod = Mod}}) when (NumberOfFailedWorkers / PoolSize) =< EnablePercentage,
+                                                Mod /= undefined->
+    case erlang:function_exported(Mod, node_up, 2) of
+        true ->
+            Mod:node_up(PoolName, NumberOfFailedWorkers);
+        false ->
+            ok
+    end;
 worker_up_cb(_, _, _) ->
     ok.
