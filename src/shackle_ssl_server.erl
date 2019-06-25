@@ -198,7 +198,7 @@ handle_msg(?MSG_CONNECT, {#state {
                 {ok, ClientState2} ->
                     ReconnectState2 =
                         ?SERVER_UTILS:reconnect_state_reset(ReconnectState),
-                    shackle_pool:enable_worker(PoolName, Index),
+                    shackle_pool:worker_up(PoolName, Index),
                     {ok, {State#state {
                         reconnect_state = ReconnectState2,
                         socket = Socket
@@ -241,7 +241,7 @@ terminate(_Reason, {#state {
 %% private
 close(#state {name = Name, pool_name = PoolName, worker_index = Index} = State, ClientState) ->
     ?SERVER_UTILS:reply_all(Name, {error, socket_closed}),
-    shackle_pool:disable_worker(PoolName, Index),
+    shackle_pool:worker_down(PoolName, Index),
     reconnect(State, ClientState).
 
 connect(PoolName, Ip, Port, SocketOptions) ->

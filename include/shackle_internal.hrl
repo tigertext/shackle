@@ -16,6 +16,7 @@
 -define(ETS_TABLE_POOL_INDEX, shackle_pool_index).
 -define(ETS_TABLE_POOL_BAD_WORKERS, shackle_pool_bad_workers).
 -define(ETS_TABLE_QUEUE, shackle_queue).
+-define(ETS_TABLE_POOL_BAD_WORKER_NUMBERS, shackle_pool_bad_worker_number).
 
 %% compatibility
 -ifdef(OTP_RELEASE). %% this implies 21 or higher
