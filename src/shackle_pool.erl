@@ -119,8 +119,10 @@ cleanup(Name, OptionsRec) ->
     cleanup_foil(Name, OptionsRec).
 
 cleanup_ets(Name, #pool_options{pool_strategy = round_robin}) ->
+    ets:delete(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, Name),
     ets:delete(?ETS_TABLE_POOL_INDEX, {Name, round_robin});
-cleanup_ets(_Name, _OptionsRec) ->
+cleanup_ets(Name, _OptionsRec) ->
+    ets:delete(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, Name),
     ok.
 
 cleanup_foil(Name, #pool_options{pool_size = PoolSize}) ->
