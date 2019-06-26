@@ -27,7 +27,7 @@ lookup(Key, List, Default) ->
 
 random(1) -> 1;
 random(N) ->
-    granderl:uniform(N).
+    crypto:rand_uniform(1, N+1).
 
 -spec random_element([term()]) ->
     term().
