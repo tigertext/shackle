@@ -12,6 +12,10 @@
     stop/1
 ]).
 
+-export([
+    worker_down/2,
+    worker_up/2
+]).
 %% internal
 -export([
     init/0,
@@ -47,10 +51,7 @@ start(Name, Client, ClientOptions, Options) ->
 
 stop(Name) ->
     case options(Name) of
-        {ok, #pool_options {
-                pool_size = PoolSize
-            } = OptionsRec} ->
-
+        {ok, #pool_options{pool_size = PoolSize} = OptionsRec} ->
             stop_children(server_names(Name, PoolSize)),
             cleanup(Name, OptionsRec),
             ok;
@@ -63,11 +64,7 @@ stop(Name) ->
     ok.
 
 init() ->
-    ets:new(?ETS_TABLE_POOL_INDEX, [
-        named_table,
-        public,
-        {write_concurrency, true}
-    ]),
+    init_ets(),
     foil:new(?MODULE),
     foil:load(?MODULE).
 
@@ -76,21 +73,25 @@ init() ->
 
 server(Name) ->
     case options(Name) of
-        {ok, #pool_options {
-                backlog_size = BacklogSize,
-                client = Client,
-                pool_size = PoolSize,
-                pool_strategy = PoolStrategy
-            }} ->
-
-            ServerIndex = server_index(Name, PoolSize, PoolStrategy),
-            Key = {Name, ServerIndex},
-            {ok, Server} = shackle_pool_foil:lookup(Key),
-            case shackle_backlog:check(Server, BacklogSize) of
-                true ->
-                    {ok, Client, Server};
-                false ->
-                    {error, backlog_full}
+        {ok, #pool_options{
+            backlog_size = BacklogSize,
+            client = Client,
+            pool_size = PoolSize,
+            pool_strategy = PoolStrategy
+        }} ->
+            
+            case server_index(Name, PoolSize, PoolStrategy) of
+                {error, Reason} ->
+                    {error, Reason};
+                ServerIndex ->
+                    Key = {Name, ServerIndex},
+                    {ok, Server} = shackle_pool_foil:lookup(Key),
+                    case shackle_backlog:check(Server, BacklogSize) of
+                        true ->
+                            {ok, Client, Server};
+                        false ->
+                            {error, backlog_full}
+                    end
             end;
         {error, Reson} ->
             {error, Reson}
@@ -102,17 +103,29 @@ server(Name) ->
 terminate() ->
     foil:delete(?MODULE).
 
+-spec worker_down(pool_name(), pos_integer()) -> no_return().
+worker_down(PoolName, Index) ->
+    ets:insert(?ETS_TABLE_POOL_BAD_WORKERS, {{PoolName, Index}, true}),
+    worker_down_cb(ets:update_counter(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, PoolName, 1), PoolName, options(PoolName)).
+
+-spec worker_up(pool_name(), pos_integer()) -> no_return().
+worker_up(PoolName, Index) ->
+    ets:delete(?ETS_TABLE_POOL_BAD_WORKERS, {PoolName, Index}),
+    worker_up_cb(ets:update_counter(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, PoolName, -1), PoolName, options(PoolName)).
+
 %% private
 cleanup(Name, OptionsRec) ->
     cleanup_ets(Name, OptionsRec),
     cleanup_foil(Name, OptionsRec).
 
-cleanup_ets(Name, #pool_options {pool_strategy = round_robin}) ->
+cleanup_ets(Name, #pool_options{pool_strategy = round_robin}) ->
+    ets:delete(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, Name),
     ets:delete(?ETS_TABLE_POOL_INDEX, {Name, round_robin});
-cleanup_ets(_Name, _OptionsRec) ->
+cleanup_ets(Name, _OptionsRec) ->
+    ets:delete(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, Name),
     ok.
 
-cleanup_foil(Name, #pool_options {pool_size = PoolSize}) ->
+cleanup_foil(Name, #pool_options{pool_size = PoolSize}) ->
     foil:delete(?MODULE, Name),
     [foil:delete(?MODULE, {Name, N}) || N <- lists:seq(1, PoolSize)],
     foil:load(?MODULE).
@@ -132,32 +145,58 @@ options_rec(Client, Options) ->
     BacklogSize = ?LOOKUP(backlog_size, Options, ?DEFAULT_BACKLOG_SIZE),
     PoolSize = ?LOOKUP(pool_size, Options, ?DEFAULT_POOL_SIZE),
     PoolStrategy = ?LOOKUP(pool_strategy, Options, ?DEFAULT_POOL_STRATEGY),
-
-    #pool_options {
+    PoolFailureThresholdPercentage = ?LOOKUP(pool_failure_threshold_percentage, Options, ?DEFAULT_POOL_FAILURE_THRESHOLD_PERCENTAGE),
+    PoolRecoverThresholdPercentage = ?LOOKUP(pool_recover_threshold_percentage, Options, ?DEFAULT_POOL_RECOVER_THRESHOLD_PERCENTAGE),
+    FailureCbMod = ?LOOKUP(pool_failure_callback_module, Options),
+    RecoverCbMod = ?LOOKUP(pool_recover_callback_module, Options),
+    #pool_options{
         backlog_size = BacklogSize,
         client = Client,
         pool_size = PoolSize,
-        pool_strategy = PoolStrategy
+        pool_strategy = PoolStrategy,
+        pool_failure_threshold_percentage = PoolFailureThresholdPercentage,
+        pool_recover_threshold_percentage = PoolRecoverThresholdPercentage,
+        pool_failure_callback_mod = FailureCbMod,
+        pool_recover_callback_mod = RecoverCbMod
     }.
 
-server_index(_Name, PoolSize, random) ->
-    shackle_utils:random(PoolSize);
-server_index(Name, PoolSize, round_robin) ->
+server_index(Name, PoolSize, Stratege) ->
+    server_index(Name, PoolSize, Stratege, 1).
+server_index(Name, PoolSize, _Stratege, N) when N > (0.5 * PoolSize) ->
+    %% too many retires and cannot find a live worker. something is wrong with this worker pool
+    %% consider disabling it.
+    shackle_utils:warning_msg(Name, "Cannot find a live worker after many retries, consider to disable this pool, tried ~p times. ", [N]),
+    {error, no_worker};
+
+server_index(Name, PoolSize, random, N) ->
+    ServerId = shackle_utils:random(PoolSize),
+    check_server_id(Name, PoolSize, ServerId, random, N + 1);
+server_index(Name, PoolSize, round_robin, N) ->
     UpdateOps = [{2, 1, PoolSize, 1}],
     Key = {Name, round_robin},
     [ServerId] = ets:update_counter(?ETS_TABLE_POOL_INDEX, Key, UpdateOps),
-    ServerId.
+    check_server_id(Name, PoolSize, ServerId, round_robin, N + 1).
+
+check_server_id(Name, PoolSize, ServerId, Stretegy, N) ->
+    case is_worker_disabled(Name, ServerId) of
+        true ->
+            shackle_utils:warning_msg(Name, "got a dead worker id ~p, try again", [ServerId]),
+            server_index(Name, PoolSize, Stretegy, N);
+        _ ->
+            ServerId
+    end.
 
 setup(Name, OptionsRec) ->
     setup_ets(Name, OptionsRec),
     setup_foil(Name, OptionsRec).
 
-setup_ets(Name, #pool_options {pool_strategy = round_robin}) ->
-    ets:insert_new(?ETS_TABLE_POOL_INDEX, {{Name, round_robin}, 1});
-setup_ets(_Name, _OptionsRec) ->
-    ok.
+setup_ets(Name, #pool_options{pool_strategy = round_robin, pool_size = Size}) ->
+    ets:insert_new(?ETS_TABLE_POOL_INDEX, {{Name, round_robin}, 1}),
+    ets:insert_new(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, {Name, Size});
+setup_ets(Name, #pool_options{pool_size = Size}) ->
+    ets:insert_new(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, {Name, Size}).
 
-setup_foil(Name, #pool_options {pool_size = PoolSize} = OptionsRec) ->
+setup_foil(Name, #pool_options{pool_size = PoolSize} = OptionsRec) ->
     foil:insert(?MODULE, Name, OptionsRec),
     [foil:insert(?MODULE, {Name, N}, server_name(Name, N)) ||
         N <- lists:seq(1, PoolSize)],
@@ -176,20 +215,23 @@ server_mod(shackle_tcp) ->
 server_mod(shackle_udp) ->
     shackle_udp_server.
 
-server_spec(ServerMod, ServerName, Name, Client, ClientOptions) ->
+server_spec(ServerMod, ServerName, Name, Client, ClientOptions, Index) ->
     StartFunc = {ServerMod, start_link,
-        [ServerName, Name, Client, ClientOptions]},
+        [ServerName, Name, Client, ClientOptions, Index]},
     {ServerName, StartFunc, permanent, 5000, worker, [ServerMod]}.
 
-start_children(Name, Client, ClientOptions, #pool_options {
-        pool_size = PoolSize
-    }) ->
-
+start_children(Name, Client, ClientOptions, #pool_options{
+    pool_size = PoolSize
+}) ->
+    
     Protocol = ?LOOKUP(protocol, ClientOptions, ?DEFAULT_PROTOCOL),
     ServerMod = server_mod(Protocol),
-    ServerNames = server_names(Name, PoolSize),
-    ServerSpecs = [server_spec(ServerMod, ServerName, Name,
-        Client, ClientOptions) || ServerName <- ServerNames],
+    ServerSpecs = [
+        begin
+            ServerName = server_name(Name, N),
+            server_spec(ServerMod, ServerName, Name,
+                Client, ClientOptions, N)
+        end || N <- lists:seq(1, PoolSize)],
     [supervisor:start_child(?SUPERVISOR, ServerSpec) ||
         ServerSpec <- ServerSpecs].
 
@@ -199,3 +241,44 @@ stop_children([ServerName | T]) ->
     supervisor:terminate_child(?SUPERVISOR, ServerName),
     supervisor:delete_child(?SUPERVISOR, ServerName),
     stop_children(T).
+
+is_worker_disabled(PoolName, Index) ->
+    ets:lookup(?ETS_TABLE_POOL_BAD_WORKERS, {PoolName, Index}) /= [].
+
+init_ets() ->
+    [
+        ets:new(Tab, [
+            named_table,
+            public,
+            {write_concurrency, true}
+        ])
+        || Tab <- [?ETS_TABLE_POOL_INDEX, ?ETS_TABLE_POOL_BAD_WORKERS, ?ETS_TABLE_POOL_BAD_WORKER_NUMBERS]
+    ].
+
+worker_down_cb(NumberOfFailedWorkers, PoolName,
+    {ok, #pool_options{pool_size = PoolSize,
+    pool_failure_threshold_percentage = DisablePercentage,
+    pool_failure_callback_mod = Mod}}) when (NumberOfFailedWorkers / PoolSize) >= DisablePercentage,
+                                            Mod /= undefined ->
+    case erlang:function_exported(Mod, node_down, 2) of
+        true ->
+            Mod:node_down(PoolName, NumberOfFailedWorkers);
+        false ->
+            ok
+    end;
+worker_down_cb(_, _, _)->
+    ok.
+
+worker_up_cb(NumberOfFailedWorkers, PoolName,
+    {ok, #pool_options{pool_size = PoolSize,
+        pool_recover_threshold_percentage = EnablePercentage,
+        pool_recover_callback_mod = Mod}}) when (NumberOfFailedWorkers / PoolSize) =< EnablePercentage,
+                                                Mod /= undefined->
+    case erlang:function_exported(Mod, node_up, 2) of
+        true ->
+            Mod:node_up(PoolName, NumberOfFailedWorkers);
+        false ->
+            ok
+    end;
+worker_up_cb(_, _, _) ->
+    ok.
