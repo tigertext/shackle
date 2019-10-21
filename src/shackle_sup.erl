@@ -20,12 +20,11 @@ start_link() ->
 
 %% supervisor callbacks
 -spec init([]) ->
-    {ok, {{one_for_one, 5, 10}, []}}.
+    {ok, {{one_for_one, 600, 1}, []}}.
 
 init([]) ->
-    shackle_monitor:start_link(),
     shackle_backlog:init(),
-    shackle_pool:init(),
+    shackle_pool:start_link(),
     shackle_queue:init(),
 
     {ok, {{one_for_one, 600, 1}, []}}.
