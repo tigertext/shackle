@@ -23,8 +23,9 @@ start_link() ->
     {ok, {{one_for_one, 5, 10}, []}}.
 
 init([]) ->
+    shackle_monitor:start_link(),
     shackle_backlog:init(),
     shackle_pool:init(),
     shackle_queue:init(),
 
-    {ok, {{one_for_one, 5, 10}, []}}.
+    {ok, {{one_for_one, 600, 1}, []}}.

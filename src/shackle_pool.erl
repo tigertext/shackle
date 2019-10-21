@@ -79,7 +79,7 @@ server(Name) ->
             pool_size = PoolSize,
             pool_strategy = PoolStrategy
         }} ->
-            
+
             case server_index(Name, PoolSize, PoolStrategy) of
                 {error, Reason} ->
                     {error, Reason};
@@ -105,8 +105,12 @@ terminate() ->
 
 -spec worker_down(pool_name(), pos_integer()) -> no_return().
 worker_down(PoolName, Index) ->
-    ets:insert(?ETS_TABLE_POOL_BAD_WORKERS, {{PoolName, Index}, true}),
-    worker_down_cb(ets:update_counter(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, PoolName, 1), PoolName, options(PoolName)).
+    case ets:lookup(?ETS_TABLE_POOL_BAD_WORKERS, {PoolName, Index}) of
+        [_Obj] -> ok;
+        _ ->
+            ets:insert(?ETS_TABLE_POOL_BAD_WORKERS, {{PoolName, Index}, true}),
+            worker_down_cb(ets:update_counter(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, PoolName, 1), PoolName, options(PoolName))
+    end.
 
 -spec worker_up(pool_name(), pos_integer()) -> no_return().
 worker_up(PoolName, Index) ->
@@ -223,17 +227,18 @@ server_spec(ServerMod, ServerName, Name, Client, ClientOptions, Index) ->
 start_children(Name, Client, ClientOptions, #pool_options{
     pool_size = PoolSize
 }) ->
-    
+
     Protocol = ?LOOKUP(protocol, ClientOptions, ?DEFAULT_PROTOCOL),
     ServerMod = server_mod(Protocol),
-    ServerSpecs = [
+    [
         begin
             ServerName = server_name(Name, N),
-            server_spec(ServerMod, ServerName, Name,
-                Client, ClientOptions, N)
-        end || N <- lists:seq(1, PoolSize)],
-    [supervisor:start_child(?SUPERVISOR, ServerSpec) ||
-        ServerSpec <- ServerSpecs].
+            ServerSpec = server_spec(ServerMod, ServerName, Name,
+                Client, ClientOptions, N),
+            {ok, Pid} = supervisor:start_child(?SUPERVISOR, ServerSpec),
+            shackle_monitor:monitor(Pid, Name, N)
+        end || N <- lists:seq(1, PoolSize)
+    ].
 
 stop_children([]) ->
     ok;
@@ -257,23 +262,23 @@ init_ets() ->
 
 worker_down_cb(NumberOfFailedWorkers, PoolName,
     {ok, #pool_options{pool_size = PoolSize,
-    pool_failure_threshold_percentage = DisablePercentage,
-    pool_failure_callback_mod = Mod}}) when (NumberOfFailedWorkers / PoolSize) >= DisablePercentage,
-                                            Mod /= undefined ->
+        pool_failure_threshold_percentage = DisablePercentage,
+        pool_failure_callback_mod = Mod}}) when (NumberOfFailedWorkers / PoolSize) >= DisablePercentage,
+    Mod /= undefined ->
     case erlang:function_exported(Mod, node_down, 2) of
         true ->
             Mod:node_down(PoolName, NumberOfFailedWorkers);
         false ->
             ok
     end;
-worker_down_cb(_, _, _)->
+worker_down_cb(_, _, _) ->
     ok.
 
 worker_up_cb(NumberOfFailedWorkers, PoolName,
     {ok, #pool_options{pool_size = PoolSize,
         pool_recover_threshold_percentage = EnablePercentage,
         pool_recover_callback_mod = Mod}}) when (NumberOfFailedWorkers / PoolSize) =< EnablePercentage,
-                                                Mod /= undefined->
+    Mod /= undefined ->
     case erlang:function_exported(Mod, node_up, 2) of
         true ->
             Mod:node_up(PoolName, NumberOfFailedWorkers);
