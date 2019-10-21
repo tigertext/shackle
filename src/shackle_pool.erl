@@ -65,13 +65,14 @@ stop(Name) ->
 
 -spec start_link() -> {ok, pid()}.
 start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 -spec init(any()) -> {ok, state()}.
 init(_) ->
     init_ets(),
     foil:new(?MODULE),
     foil:load(?MODULE),
+    process_flag(trap_exit, true),
     {ok, maps:new()}.
 
 -spec handle_call(any(), pid(), state()) -> {reply, any(), state()}.
@@ -85,8 +86,7 @@ handle_call({stop_pool, Name, #pool_options{pool_size = PoolSize} = OptionsRec},
                 Pid ->
                     case maps:is_key(Pid, Acc) of
                         true ->
-                            #{ref := Ref} = maps:get(Pid, Acc),
-                            erlang:demonitor(Ref),
+                            erlang:unlink(Pid),
                             exit(Pid, kill),
                             maps:remove(Pid, Acc);
                         _ ->
@@ -112,21 +112,23 @@ handle_cast(_Request, State) ->
     {noreply, State}.
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
-handle_info({'DOWN', _MonitorRef, process, Pid, _Info}, Workers) ->
-    shackle_utils:warning_msg(undefined, "worker down pid ~p info ~p", [Pid, _Info]),
+handle_info({'EXIT', Pid, _Reason}, Workers) ->
+    ct:pal("exit ~p ", [{Pid, _Reason}]),
+    shackle_utils:warning_msg(undefined, "worker down pid ~p info ~p", [Pid, _Reason]),
     Workers2 =
         case maps:is_key(Pid, Workers) of
             true ->
-                Param = #{ref := Ref, server_mod := ServerMod, serveer_name := ServerName,
+                Param = #{server_mod := ServerMod, serveer_name := ServerName,
                     pool_name := Pool_Name, client := Client, client_options := ClientOptions, index := Index} = maps:get(Pid, Workers),
-                erlang:demonitor(Ref),
+                erlang:unlink(Pid),
                 shackle_utils:warning_msg(Pool_Name, "worker down pid ~p info ~p", [Pid, Param]),
                 worker_down(Pool_Name, Index),
                 {ok, Pid2} = ServerMod:start_link(ServerName, Pool_Name, Client, ClientOptions, Index),
-                Ref1 = erlang:monitor(process, Pid),
                 Workers1 = maps:remove(Pid, Workers),
-                maps:put(Pid2, Param#{ref => Ref1}, Workers1);
+                shackle_utils:warning_msg(Pool_Name, "worker restarted ~p failed workers ~p failed worker number ~p", [Pid, ets:tab2list(?ETS_TABLE_POOL_BAD_WORKERS), ets:tab2list(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS)]),
+                maps:put(Pid2, Param, Workers1);
             false ->
+                shackle_utils:warning_msg(undefined, "Woker down, cannot be handled, cannot find pool info! pid ~p ", [Pid]),
                 ok
         end,
     {noreply, Workers2}.
@@ -297,8 +299,7 @@ start_workers(Name, Client, ClientOptions, #pool_options{pool_size = PoolSize}) 
         begin
             ServerName = server_name(Name, N),
             {ok, Pid} = ServerMod:start_link(ServerName, Name, Client, ClientOptions, N),
-            Ref = erlang:monitor(process, Pid),
-            {Pid, #{ref => Ref, server_mod => ServerMod, serveer_name => ServerName,
+            {Pid, #{server_mod => ServerMod, serveer_name => ServerName,
                 pool_name => Name, client=> Client, client_options => ClientOptions, index => N}}
         end || N <- lists:seq(1, PoolSize)
     ].
