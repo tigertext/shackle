@@ -113,12 +113,11 @@ handle_cast(_Request, State) ->
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
 handle_info({'EXIT', Pid, _Reason}, Workers) ->
-    ct:pal("exit ~p ", [{Pid, _Reason}]),
     shackle_utils:warning_msg(undefined, "worker down pid ~p info ~p", [Pid, _Reason]),
     Workers2 =
         case maps:is_key(Pid, Workers) of
             true ->
-                Param = #{server_mod := ServerMod, serveer_name := ServerName,
+                Param = #{server_mod := ServerMod, server_name := ServerName,
                     pool_name := Pool_Name, client := Client, client_options := ClientOptions, index := Index} = maps:get(Pid, Workers),
                 erlang:unlink(Pid),
                 shackle_utils:warning_msg(Pool_Name, "worker down pid ~p info ~p", [Pid, Param]),
@@ -129,7 +128,7 @@ handle_info({'EXIT', Pid, _Reason}, Workers) ->
                 maps:put(Pid2, Param, Workers1);
             false ->
                 shackle_utils:warning_msg(undefined, "Woker down, cannot be handled, cannot find pool info! pid ~p ", [Pid]),
-                ok
+                Workers
         end,
     {noreply, Workers2}.
 
@@ -299,7 +298,7 @@ start_workers(Name, Client, ClientOptions, #pool_options{pool_size = PoolSize}) 
         begin
             ServerName = server_name(Name, N),
             {ok, Pid} = ServerMod:start_link(ServerName, Name, Client, ClientOptions, N),
-            {Pid, #{server_mod => ServerMod, serveer_name => ServerName,
+            {Pid, #{server_mod => ServerMod, server_name => ServerName,
                 pool_name => Name, client=> Client, client_options => ClientOptions, index => N}}
         end || N <- lists:seq(1, PoolSize)
     ].
