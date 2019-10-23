@@ -53,6 +53,7 @@ start() ->
     ok | {error, shackle_not_started | pool_already_started}.
 
 start(PoolOptions) ->
+    shackle_pool:start_link(),
     shackle_pool:start(?POOL_NAME, ?CLIENT_TCP, [
         {port, ?PORT},
         {reconnect, true},
@@ -67,7 +68,8 @@ start(PoolOptions) ->
     ok | {error, pool_not_started}.
 
 stop() ->
-    shackle_pool:stop(?POOL_NAME).
+    shackle_pool:stop(?POOL_NAME),
+    exit(whereis(shackle_pool), kill).
 
 %% shackle_server callbacks
 init(_) ->

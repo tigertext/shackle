@@ -31,7 +31,7 @@ edoc:
 
 elvis:
 	@echo "Running elvis rock..."
-	@$(ELVIS) rock
+	@$(ELVIS) rock  -c config/elvis.config
 
 eunit:
 	@echo "Running rebar3 eunit..."
