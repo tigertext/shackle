@@ -75,7 +75,7 @@ init(_) ->
     process_flag(trap_exit, true),
     {ok, maps:new()}.
 
--spec handle_call(any(), pid(), state()) -> {reply, any(), state()}.
+-spec handle_call(any(), {pid(),_}, state()) -> {reply, any(), state()}.
 handle_call({stop_pool, Name, #pool_options{pool_size = PoolSize} = OptionsRec}, _From, WorkersMap) ->
     Workers = server_names(Name, PoolSize),
     WorkersMap2 =
