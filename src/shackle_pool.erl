@@ -5,7 +5,7 @@
 -ignore_xref([
     {shackle_pool_foil, lookup, 1}
 ]).
--type(state():: map()).
+-type(state() :: map()).
 
 %% public
 %% gen_server callbacks.
@@ -79,23 +79,7 @@ init(_) ->
 handle_call({stop_pool, Name, #pool_options{pool_size = PoolSize} = OptionsRec}, _From, WorkersMap) ->
     Workers = server_names(Name, PoolSize),
     WorkersMap2 =
-        lists:foldl(fun(Worker, Acc) ->
-            case whereis(Worker) of
-                undefined ->
-                    Acc;
-                Pid ->
-                    case maps:is_key(Pid, Acc) of
-                        true ->
-                            erlang:unlink(Pid),
-                            exit(Pid, kill),
-                            maps:remove(Pid, Acc);
-                        _ ->
-                            exit(Pid, kill),
-                            Acc
-                    end
-            end
-                    end, WorkersMap, Workers),
-    
+        lists:foldl(fun stop_worker_in_pool/2, WorkersMap, Workers),
     cleanup_pool(Name, OptionsRec),
     {reply, ok, WorkersMap2};
 
@@ -103,7 +87,9 @@ handle_call({start_pool, Name, Client, ClientOptions, Options}, _From, WorkersMa
     OptionsRec = options_rec(Client, Options),
     setup_pool(Name, OptionsRec),
     NewMap =
-        lists:foldl(fun({Pid, Parmas}, Acc) -> maps:put(Pid, Parmas, Acc) end, WorkersMap,
+        lists:foldl(fun({Pid, Parmas}, Acc) ->
+            maps:put(Pid, Parmas, Acc)
+                    end, WorkersMap,
             start_workers(Name, Client, ClientOptions, OptionsRec)),
     {reply, ok, NewMap}.
 
@@ -118,16 +104,20 @@ handle_info({'EXIT', Pid, _Reason}, Workers) ->
         case maps:is_key(Pid, Workers) of
             true ->
                 Param = #{server_mod := ServerMod, server_name := ServerName,
-                    pool_name := Pool_Name, client := Client, client_options := ClientOptions, index := Index} = maps:get(Pid, Workers),
+                    pool_name := Pool_Name, client := Client,
+                    client_options := ClientOptions,
+                    index := Index} = maps:get(Pid, Workers),
                 erlang:unlink(Pid),
-                shackle_utils:warning_msg(Pool_Name, "worker down pid ~p info ~p", [Pid, Param]),
+                shackle_utils:warning_msg(Pool_Name, "worker down pid ~p info ~p",  [Pid, Param]),
                 worker_down(Pool_Name, Index),
                 {ok, Pid2} = ServerMod:start_link(ServerName, Pool_Name, Client, ClientOptions, Index),
                 Workers1 = maps:remove(Pid, Workers),
-                shackle_utils:warning_msg(Pool_Name, "worker restarted ~p failed workers ~p failed worker number ~p", [Pid, ets:tab2list(?ETS_TABLE_POOL_BAD_WORKERS), ets:tab2list(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS)]),
+                shackle_utils:warning_msg(Pool_Name, "worker restarted ~p failed workers ~p failed worker number ~p",
+                    [Pid, ets:tab2list(?ETS_TABLE_POOL_BAD_WORKERS), ets:tab2list(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS)]),
                 maps:put(Pid2, Param, Workers1);
             false ->
-                shackle_utils:warning_msg(undefined, "Woker down, cannot be handled, cannot find pool info! pid ~p ", [Pid]),
+                shackle_utils:warning_msg(undefined,
+                    "Woker down, cannot be handled, cannot find pool info! ~p ", [Pid]),
                 Workers
         end,
     {noreply, Workers2}.
@@ -150,19 +140,11 @@ server(Name) ->
             pool_size = PoolSize,
             pool_strategy = PoolStrategy
         }} ->
-            
             case server_index(Name, PoolSize, PoolStrategy) of
                 {error, Reason} ->
                     {error, Reason};
                 ServerIndex ->
-                    Key = {Name, ServerIndex},
-                    {ok, Server} = shackle_pool_foil:lookup(Key),
-                    case shackle_backlog:check(Server, BacklogSize) of
-                        true ->
-                            {ok, Client, Server};
-                        false ->
-                            {error, backlog_full}
-                    end
+                    backlog_check({Name, ServerIndex}, BacklogSize, Client)
             end;
         {error, Reson} ->
             {error, Reson}
@@ -180,13 +162,15 @@ worker_down(PoolName, Index) ->
         [_Obj] -> ok;
         _ ->
             ets:insert(?ETS_TABLE_POOL_BAD_WORKERS, {{PoolName, Index}, true}),
-            worker_down_cb(ets:update_counter(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, PoolName, 1), PoolName, options(PoolName))
+            Counter = ets:update_counter(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, PoolName, 1),
+            worker_down_cb(Counter, PoolName, options(PoolName))
     end.
 
 -spec worker_up(pool_name(), pos_integer()) -> no_return().
 worker_up(PoolName, Index) ->
     ets:delete(?ETS_TABLE_POOL_BAD_WORKERS, {PoolName, Index}),
-    worker_up_cb(ets:update_counter(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, PoolName, -1), PoolName, options(PoolName)).
+    Counter = ets:update_counter(?ETS_TABLE_POOL_BAD_WORKER_NUMBERS, PoolName, -1),
+    worker_up_cb(Counter, PoolName, options(PoolName)).
 
 %% private
 cleanup_pool(Name, OptionsRec) ->
@@ -344,3 +328,27 @@ worker_up_cb(NumberOfFailedWorkers, PoolName,
 worker_up_cb(_, _, _) ->
     ok.
 
+stop_worker_in_pool(Worker, Acc) ->
+    case whereis(Worker) of
+        undefined ->
+            Acc;
+        Pid ->
+            case maps:is_key(Pid, Acc) of
+                true ->
+                    erlang:unlink(Pid),
+                    exit(Pid, kill),
+                    maps:remove(Pid, Acc);
+                _ ->
+                    exit(Pid, kill),
+                    Acc
+            end
+    end.
+
+backlog_check(Key, BacklogSize, Client) ->
+    {ok, Server} = shackle_pool_foil:lookup(Key),
+    case shackle_backlog:check(Server, BacklogSize) of
+        true ->
+            {ok, Client, Server};
+        false ->
+            {error, backlog_full}
+    end.
